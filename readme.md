@@ -73,7 +73,13 @@ O projeto deve ser executado seguindo o fluxo abaixo:
 3. (Opcional) Importar os CSVs no banco de dados e executar as queries SQL
 4. Executar a API para consulta e visualização dos dados
 
-As instruções detalhadas de cada etapa serão descritas conforme os scripts forem implementados.
+### Execução do ETL
+
+1. Download dos últimos 3 trimestres da ANS:
+
+```bash
+python etl/download_ans.py
+```
 
 ## Decisões Técnicas e Trade-offs
 
