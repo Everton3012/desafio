@@ -1,115 +1,181 @@
 # Teste Técnico - Estágio IntuitiveCare 2026
 
 ## Visão Geral
+
 Projeto desenvolvido em Python para coleta, processamento, validação, consolidação e
 disponibilização de dados de despesas das operadoras de saúde a partir da API de Dados Abertos da ANS.
 
 O projeto está dividido em etapas que correspondem às partes do teste técnico: ETL de dados,
 validação e enriquecimento, consultas SQL e disponibilização via API.
 
+---
+
+## Fonte dos Dados
+
+Os dados utilizados no projeto são provenientes da API de Dados Abertos da ANS (Agência Nacional de Saúde Suplementar):
+
+https://dadosabertos.ans.gov.br/FTP/PDA/
+
+Foram utilizados os arquivos de Demonstrações Contábeis trimestrais das operadoras de planos de saúde,
+organizados por ano e trimestre, conforme estrutura disponibilizada pela ANS.
+
+---
+
 ## Tecnologias
+
 - Python 3.10+
 - Pandas
 - FastAPI
 - Requests
 - Git
 
+---
+
 ## Estrutura do Projeto
 
-```
 Teste_IntuitiveCare/
 │
-├── etl/                # Scripts de extração e processamento dos dados (ETL)
+├── etl/
 │   ├── download_ans.py
 │   ├── process_files.py
 │   └── consolidate.py
 │
 ├── data/
-│   ├── raw/            # Arquivos ZIP baixados da ANS
-│   ├── extracted/     # Arquivos descompactados
-│   └── final/         # CSVs finais gerados pelo processamento
+│   ├── raw/
+│   ├── extracted/
+│   └── final/
 │
-├── api/                # API em FastAPI para disponibilização dos dados
+├── api/
 │   └── main.py
 │
-├── sql/                # Scripts SQL (DDL, importação e queries analíticas)
+├── sql/
+│
+├── logs/
+│   └── etl.log
 │
 ├── requirements.txt
 └── README.md
-```
+
+---
 
 ## Como Executar
 
 ### 1. Criar ambiente virtual
 
-```bash
 python -m venv .venv
-```
 
 ### 2. Ativar ambiente virtual
 
 Windows:
-```bash
+
 .venv\Scripts\activate
-```
 
 Linux/Mac:
-```bash
+
 source .venv/bin/activate
-```
 
 ### 3. Instalar dependências
 
-```bash
 pip install -r requirements.txt
-```
 
-### 4. Fluxo geral de execução
+---
 
-O projeto deve ser executado seguindo o fluxo abaixo:
+## Execução do ETL
 
-1. Executar os scripts de ETL para download e processamento dos dados da ANS
-2. Gerar os arquivos CSV finais na pasta `data/final`
-3. (Opcional) Importar os CSVs no banco de dados e executar as queries SQL
-4. Executar a API para consulta e visualização dos dados
+### 1. Download dos últimos 3 trimestres da ANS
 
-### Execução do ETL
-
-1. Download dos últimos 3 trimestres da ANS:
-
-```bash
 python etl/download_ans.py
-```
+
+O script identifica automaticamente os últimos três trimestres disponíveis e realiza o download
+dos arquivos ZIP para a pasta data/raw.
+
+### 2. Extração, filtragem e consolidação das despesas
+
+python etl/process_files.py
+
+O script realiza:
+
+- Extração automática dos arquivos ZIP
+- Leitura de arquivos em diferentes formatos (CSV, TXT e XLSX)
+- Filtragem de registros relacionados a despesas assistenciais
+- Normalização de valores monetários
+- Agregação por operadora e trimestre
+
+O resultado é salvo em:
+
+data/final/despesas_por_operadora_trimestre.csv
+
+Todo o processo gera logs detalhados em:
+
+logs/etl.log
+
+### 3. Enriquecimento com dados cadastrais das operadoras
+
+python etl/consolidate.py
+
+Este script realiza o cruzamento dos dados consolidados com a base cadastral de operadoras da ANS,
+adicionando CNPJ e Razão Social, gerando o arquivo final no formato exigido pelo teste técnico.
+
+---
 
 ## Decisões Técnicas e Trade-offs
 
 ### Escolha da Linguagem
-Foi escolhido Python devido à sua ampla utilização em projetos de integração e processamento
-de dados, além do ecossistema de bibliotecas que facilitam a leitura de diferentes formatos
-(CSV, TXT e XLSX), tratamento de dados e integração com APIs REST.
 
-Essa escolha permite maior produtividade e foco na lógica de negócio em comparação com
-abordagens mais verbosas.
+Foi escolhido Python devido à sua ampla utilização em projetos de integração e processamento de dados,
+além do ecossistema de bibliotecas que facilitam a leitura de diferentes formatos de arquivos,
+tratamento de dados e integração com APIs REST.
 
-### Framework de API
-Para a camada de API, foi escolhido o FastAPI por ser um framework leve, com alto desempenho,
-validação automática de dados e documentação integrada via Swagger, facilitando testes e uso
-pelo frontend.
+Essa escolha permite maior produtividade e foco na lógica de negócio.
 
 ### Organização do Pipeline
-O processo de dados foi dividido em scripts separados (download, processamento e consolidação)
-para facilitar manutenção, testes e entendimento do fluxo de dados.
 
-### Versionamento de Dados
-Os arquivos brutos da ANS não são versionados no repositório por serem grandes e facilmente
-reproduzíveis através dos scripts de download. Apenas o código e, opcionalmente, os arquivos
-finais consolidados são versionados.
+O processo foi dividido em scripts independentes para facilitar manutenção, testes e compreensão do
+fluxo de dados:
+
+- Download
+- Processamento e consolidação
+- Enriquecimento cadastral
+
+### Uso de Memória e Performance
+
+Os arquivos são processados individualmente e filtrados antes da agregação, evitando manter grandes
+volumes de dados brutos simultaneamente em memória. Apenas os dados agregados por operadora e
+trimestre são mantidos para a consolidação final.
+
+### Tratamento de Inconsistências
+
+Foram consideradas as seguintes situações:
+
+- Arquivos com estruturas diferentes: apenas arquivos contendo as colunas REG_ANS, DESCRICAO e
+  VL_SALDO_FINAL são processados. Arquivos fora desse padrão são ignorados e registrados em log.
+
+- Valores zerados ou negativos: os valores são mantidos, pois podem representar ajustes contábeis ou
+  estornos, sendo relevantes para análise financeira.
+
+- Formatos inconsistentes de nomes de arquivos: quando não é possível extrair ano e trimestre do
+  nome do arquivo, o registro é descartado e registrado em log.
+
+- Divergências cadastrais: os dados de CNPJ e Razão Social são obtidos diretamente da base oficial da
+  ANS, considerada como fonte de maior confiabilidade.
+
+---
+
+## Resultado Final
+
+O processamento gera como saída principal:
+
+- data/final/despesas_por_operadora_trimestre.csv  
+  Contendo os valores consolidados de despesas assistenciais por operadora, ano e trimestre.
+
+- consolidado_despesas.zip  
+  Arquivo compactado contendo o CSV final no formato exigido pelo teste técnico.
+
+---
 
 ## Limitações e Melhorias Futuras
 
 - Implementar testes automatizados para os scripts de ETL e para a API.
-- Melhorar o tratamento de inconsistências nos dados, registrando logs mais detalhados.
-- Persistir os dados em banco de dados relacional para consultas mais performáticas na API.
-- Implementar cache para estatísticas agregadas na API.
-- Criar interface frontend completa para visualização dos dados.
-
+- Persistir os dados em banco de dados relacional para consultas mais performáticas.
+- Implementar cache para consultas frequentes na API.
+- Criar interface frontend para visualização dos dados.
