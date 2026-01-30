@@ -1,34 +1,30 @@
-import pandas as pd
+# etl/process_files.py
+import logging
+import re
 import zipfile
 from pathlib import Path
-import re
-import logging
+
+import pandas as pd
+
+from etl.logging_config import setup_logging
 
 RAW_DIR = Path("data/raw")
 EXTRACTED_DIR = Path("data/extracted")
 FINAL_DIR = Path("data/final")
-LOG_DIR = Path("logs")
 
 EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_DIR.mkdir(parents=True, exist_ok=True)
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "etl.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ],
-)
+logger = setup_logging("process_files", "pipeline.log", logging.INFO)
 
-logger = logging.getLogger("etl")
+def _extract_zip_files() -> None:
+    zips = list(RAW_DIR.glob("*.zip"))
+    if not zips:
+        logger.info("Nenhum ZIP encontrado em data/raw.")
+        return
 
-
-def extract_zip_files():
-    for zip_path in RAW_DIR.glob("*.zip"):
+    for zip_path in zips:
         extract_path = EXTRACTED_DIR / zip_path.stem
-
         if extract_path.exists():
             logger.info(f"ZIP já extraído: {zip_path.name}")
             continue
@@ -37,56 +33,49 @@ def extract_zip_files():
         extract_path.mkdir(parents=True, exist_ok=True)
 
         try:
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                zip_ref.extractall(extract_path)
+            with zipfile.ZipFile(zip_path, "r") as z:
+                z.extractall(extract_path)
         except Exception as e:
             logger.error(f"Falha ao extrair {zip_path.name}: {e}")
 
-    logger.info("Extração concluída.")
-
-
-def read_file(file_path: Path):
+def _read_file(file_path: Path) -> pd.DataFrame | None:
     try:
-        if file_path.suffix.lower() in [".csv", ".txt"]:
+        suf = file_path.suffix.lower()
+        if suf in [".csv", ".txt"]:
             return pd.read_csv(file_path, sep=";", encoding="latin1")
-
-        if file_path.suffix.lower() in [".xls", ".xlsx"]:
+        if suf in [".xls", ".xlsx"]:
             return pd.read_excel(file_path)
-
     except Exception as e:
-        logger.error(f"Erro ao ler {file_path.name}: {e}")
-
+        logger.error(f"Erro ao ler {file_path}: {e}")
     return None
 
+def run() -> Path:
+    logger.info("Iniciando processamento de despesas assistenciais.")
+    _extract_zip_files()
 
-def process_files():
-    logger.info("Iniciando consolidação de despesas assistenciais.")
+    results: list[pd.DataFrame] = []
+    candidates = list(EXTRACTED_DIR.rglob("*"))
+    if not candidates:
+        logger.error("Nenhum arquivo encontrado em data/extracted. Verifique os ZIPs em data/raw.")
+        raise FileNotFoundError("Nenhum arquivo para processar em data/extracted.")
 
-    results = []
-
-    for file_path in EXTRACTED_DIR.rglob("*"):
+    for file_path in candidates:
         if file_path.suffix.lower() not in [".csv", ".txt", ".xls", ".xlsx"]:
             continue
 
-        logger.info(f"Lendo: {file_path}")
-
-        df = read_file(file_path)
+        df = _read_file(file_path)
         if df is None:
             continue
 
         required = {"DESCRICAO", "REG_ANS", "VL_SALDO_FINAL"}
         if not required.issubset(df.columns):
-            logger.warning(f"Arquivo ignorado (colunas ausentes): {file_path.name}")
+            logger.info(f"Ignorado (colunas ausentes): {file_path.name}")
             continue
 
-        total_before = len(df)
-
-        df = df[df["DESCRICAO"].astype(str).str.contains(
-            "EVENTOS|SINISTROS|ASSISTENC", case=False, na=False
-        )]
-
-        total_after = len(df)
-        logger.info(f"Registros: {total_before} -> {total_after}")
+        before = len(df)
+        df = df[df["DESCRICAO"].astype(str).str.contains("EVENTOS|SINISTROS|ASSISTENC", case=False, na=False)]
+        after = len(df)
+        logger.info(f"{file_path.name} | Registros: {before} -> {after}")
 
         try:
             df["VL_SALDO_FINAL"] = (
@@ -100,41 +89,31 @@ def process_files():
             logger.error(f"Erro ao converter valores em {file_path.name}: {e}")
             continue
 
-        match = re.search(r"(\d)T(\d{4})", file_path.name)
-        if not match:
-            logger.warning(f"Data não identificada no nome: {file_path.name}")
+        m = re.search(r"(\d)T(\d{4})", file_path.name)
+        if not m:
+            logger.info(f"Ignorado (sem trimestre/ano no nome): {file_path.name}")
             continue
 
-        quarter = int(match.group(1))
-        year = int(match.group(2))
+        trimestre = int(m.group(1))
+        ano = int(m.group(2))
 
         grouped = df.groupby("REG_ANS")["VL_SALDO_FINAL"].sum().reset_index()
-        grouped["ano"] = year
-        grouped["trimestre"] = quarter
+        grouped["ano"] = ano
+        grouped["trimestre"] = trimestre
 
         results.append(grouped)
 
     if not results:
-        logger.error("Nenhum dado válido processado.")
-        return
+        logger.error("Nenhum dado válido foi processado.")
+        raise RuntimeError("Nenhum dado válido foi processado.")
 
     final_df = pd.concat(results, ignore_index=True)
-
-    final_df = (
-        final_df
-        .groupby(["REG_ANS", "ano", "trimestre"], as_index=False)["VL_SALDO_FINAL"]
-        .sum()
-    )
-
     final_df["VL_SALDO_FINAL"] = final_df["VL_SALDO_FINAL"].round(2)
 
-    output_file = FINAL_DIR / "despesas_por_operadora_trimestre.csv"
-    final_df.to_csv(output_file, index=False, sep=";")
-
-    logger.info(f"Arquivo final: {output_file}")
-    logger.info(f"Total de linhas: {len(final_df)}")
-
+    out = FINAL_DIR / "despesas_por_operadora_trimestre.csv"
+    final_df.to_csv(out, index=False, sep=";")
+    logger.info(f"Arquivo gerado: {out} | Linhas: {len(final_df)}")
+    return out
 
 if __name__ == "__main__":
-    extract_zip_files()
-    process_files()
+    run()

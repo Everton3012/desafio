@@ -1,130 +1,117 @@
-import pandas as pd
-from pathlib import Path
+# etl/consolidate.py
 import logging
 import zipfile
+from pathlib import Path
 
-DATA_FINAL = Path("data/final")
+import pandas as pd
+
+from etl.logging_config import setup_logging
+
 RAW_DIR = Path("data/raw")
-LOG_DIR = Path("logs")
+FINAL_DIR = Path("data/final")
+FINAL_DIR.mkdir(parents=True, exist_ok=True)
 
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+logger = setup_logging("consolidate", "pipeline.log", logging.INFO)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_DIR / "etl.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    mapping = {
+        "CNPJ": "CNPJ",
+        "Cnpj": "CNPJ",
+        "CNPJ_OPERADORA": "CNPJ",
+        "CNPJ Operadora": "CNPJ",
+        "RAZAO_SOCIAL": "RAZAO_SOCIAL",
+        "Razao_Social": "RAZAO_SOCIAL",
+        "RazaoSocial": "RAZAO_SOCIAL",
+        "Razão Social": "RAZAO_SOCIAL",
+        "REGISTRO_OPERADORA": "RegistroANS",
+        "Registro_ANS": "RegistroANS",
+        "REG_ANS": "RegistroANS",
+        "MODALIDADE": "Modalidade",
+        "Modalidade": "Modalidade",
+        "UF": "UF",
+    }
+    cols = {c: mapping[c] for c in df.columns if c in mapping}
+    if cols:
+        df = df.rename(columns=cols)
+    return df
 
-logger = logging.getLogger("consolidate")
-
-
-def load_operadoras():
-    logger.info("Carregando cadastros de operadoras (ativas + canceladas).")
-
-    files = list(RAW_DIR.glob("Relatorio_cadop*.csv")) + list(RAW_DIR.glob("Relatorio_cadop*.txt"))
-
-    if not files:
-        logger.error("Arquivo de operadoras não encontrado em data/raw.")
-        return None
-
-    dfs = []
-
-    for file in files:
-        try:
-            logger.info(f"Lendo cadastro: {file.name}")
-            df = pd.read_csv(file, sep=";", encoding="latin1")
-            
-            # Normalizar nomes de colunas IMEDIATAMENTE após ler
-            col_map = {
-                "Registro_ANS": "REG_ANS",
-                "REGISTRO_OPERADORA": "REG_ANS",  # Adicionar este mapeamento
-                "Razao_Social": "RAZAO_SOCIAL",
-                "RAZAO_SOCIAL": "RAZAO_SOCIAL",  # Já pode estar em maiúsculas
-                "CNPJ": "CNPJ",
-            }
-            
-            for col in col_map:
-                if col in df.columns:
-                    df.rename(columns={col: col_map[col]}, inplace=True)
-            
-            dfs.append(df)
-        except Exception as e:
-            logger.error(f"Erro ao ler {file.name}: {e}")
-
-    if not dfs:
-        logger.error("Nenhum cadastro de operadora pôde ser carregado.")
-        return None
-
-    operadoras = pd.concat(dfs, ignore_index=True)
-
-    # Agora podemos usar REG_ANS com segurança
-    if "REG_ANS" in operadoras.columns:
-        operadoras = operadoras.drop_duplicates(subset=["REG_ANS"])
-    else:
-        logger.warning("Coluna REG_ANS não encontrada, pulando remoção de duplicatas.")
-        logger.warning(f"Colunas disponíveis: {list(operadoras.columns)}")
-
-    logger.info(f"Total de operadoras carregadas: {len(operadoras)}")
-
-    return operadoras
-
-def consolidate():
+def run(despesas_path: Path | None = None) -> Path:
     logger.info("Iniciando consolidação final com dados cadastrais.")
 
-    despesas_file = DATA_FINAL / "despesas_por_operadora_trimestre.csv"
+    if despesas_path is None:
+        despesas_path = FINAL_DIR / "despesas_por_operadora_trimestre.csv"
 
-    if not despesas_file.exists():
+    if not despesas_path.exists():
         logger.error("Arquivo de despesas não encontrado. Execute process_files.py primeiro.")
-        return
+        raise FileNotFoundError(str(despesas_path))
 
-    try:
-        despesas = pd.read_csv(despesas_file, sep=";")
-        logger.info(f"Registros de despesas: {len(despesas)}")
-    except Exception as e:
-        logger.error(f"Erro ao ler despesas: {e}")
-        return
+    despesas = pd.read_csv(despesas_path, sep=";")
+    logger.info(f"Registros de despesas: {len(despesas)}")
 
-    operadoras = load_operadoras()
-    if operadoras is None:
-        return
+    cadastro_files = list(RAW_DIR.glob("Relatorio_cadop*.csv"))
+    if not cadastro_files:
+        logger.error("Arquivos de operadoras não encontrados em data/raw.")
+        raise FileNotFoundError("Relatorio_cadop*.csv não encontrado em data/raw.")
 
-    # Remover normalização duplicada - já foi feita em load_operadoras()
-    
-    required = {"REG_ANS", "RAZAO_SOCIAL", "CNPJ"}
-    if not required.issubset(set(operadoras.columns)):
-        logger.error(f"Colunas esperadas não encontradas no cadastro: {operadoras.columns}")
-        return
+    logger.info("Carregando cadastros de operadoras (ativas + canceladas).")
 
-    operadoras = operadoras[["REG_ANS", "CNPJ", "RAZAO_SOCIAL"]]
+    cadastros = []
+    for f in cadastro_files:
+        logger.info(f"Lendo cadastro: {f.name}")
+        df_cad = pd.read_csv(f, sep=";", encoding="latin1")
+        df_cad = _normalize_columns(df_cad)
+        if "CNPJ" in df_cad.columns:
+            df_cad["CNPJ"] = df_cad["CNPJ"].astype(str)
+        cadastros.append(df_cad)
+
+    cadastro = pd.concat(cadastros, ignore_index=True)
+    logger.info(f"Total de operadoras carregadas: {len(cadastro)}")
+
+    despesas = _normalize_columns(despesas)
+    if "CNPJ" not in despesas.columns:
+        if "CNPJ" in cadastro.columns and "RegistroANS" in cadastro.columns and "REG_ANS" in despesas.columns:
+            pass
+
+    if "REG_ANS" in despesas.columns:
+        despesas = despesas.rename(columns={"REG_ANS": "RegistroANS"})
+    if "RegistroANS" in cadastro.columns:
+        cadastro["RegistroANS"] = cadastro["RegistroANS"].astype(str)
+    if "RegistroANS" in despesas.columns:
+        despesas["RegistroANS"] = despesas["RegistroANS"].astype(str)
+
+    cols_keep = []
+    for c in ["RegistroANS", "CNPJ", "RAZAO_SOCIAL"]:
+        if c in cadastro.columns:
+            cols_keep.append(c)
+
+    cadastro_min = cadastro[cols_keep].copy() if cols_keep else cadastro.copy()
+    if "RegistroANS" in cadastro_min.columns:
+        cadastro_min = cadastro_min.drop_duplicates(subset=["RegistroANS"])
+    elif "CNPJ" in cadastro_min.columns:
+        cadastro_min = cadastro_min.drop_duplicates(subset=["CNPJ"])
 
     logger.info("Realizando merge despesas x operadoras.")
+    if "RegistroANS" in despesas.columns and "RegistroANS" in cadastro_min.columns:
+        merged = despesas.merge(cadastro_min, on="RegistroANS", how="left", suffixes=("", "_cad"))
+    else:
+        raise RuntimeError("Não foi possível identificar chave de merge (RegistroANS).")
 
-    final_df = despesas.merge(operadoras, on="REG_ANS", how="left")
+    if "RAZAO_SOCIAL" not in merged.columns and "RAZAO_SOCIAL_cad" in merged.columns:
+        merged["RAZAO_SOCIAL"] = merged["RAZAO_SOCIAL_cad"]
+    if "CNPJ" not in merged.columns and "CNPJ_cad" in merged.columns:
+        merged["CNPJ"] = merged["CNPJ_cad"]
 
-    missing = final_df["RAZAO_SOCIAL"].isna().sum()
-    if missing > 0:
-        logger.warning(f"{missing} registros sem correspondência no cadastro ANS.")
+    out_csv = FINAL_DIR / "despesas_consolidadas_final.csv"
+    merged.to_csv(out_csv, index=False, sep=";")
+    logger.info(f"Arquivo final gerado: {out_csv}")
 
-    final_df = final_df[
-        ["REG_ANS", "CNPJ", "RAZAO_SOCIAL", "ano", "trimestre", "VL_SALDO_FINAL"]
-    ]
+    out_zip = FINAL_DIR / "consolidado_despesas.zip"
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(out_csv, out_csv.name)
 
-    final_df = final_df.sort_values(["ano", "trimestre", "VL_SALDO_FINAL"], ascending=[True, True, False])
-
-    output_csv = DATA_FINAL / "despesas_consolidadas_final.csv"
-    final_df.to_csv(output_csv, index=False, sep=";")
-
-    logger.info(f"Arquivo final gerado: {output_csv}")
-
-    zip_path = DATA_FINAL / "consolidado_despesas.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(output_csv, arcname=output_csv.name)
-
-    logger.info(f"ZIP final gerado: {zip_path}")
+    logger.info(f"ZIP final gerado: {out_zip}")
     logger.info("Consolidação final concluída com sucesso.")
+    return out_csv
 
 if __name__ == "__main__":
-    consolidate()
+    run()

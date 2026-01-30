@@ -1,71 +1,68 @@
-import requests
+# etl/download_operadoras.py
 from pathlib import Path
+import logging
+import requests
 from bs4 import BeautifulSoup
-
-BASES = {
-    "ativas": "https://dadosabertos.ans.gov.br/FTP/PDA/operadoras_de_plano_de_saude_ativas/",
-    "canceladas": "https://dadosabertos.ans.gov.br/FTP/PDA/operadoras_de_plano_de_saude_canceladas/",
-}
+from etl.logging_config import setup_logging
 
 RAW_DIR = Path("data/raw")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
+ATIVAS_URL = "https://dadosabertos.ans.gov.br/FTP/PDA/operadoras_de_plano_de_saude_ativas/"
+CANCELADAS_URL = "https://dadosabertos.ans.gov.br/FTP/PDA/operadoras_de_plano_de_saude_canceladas/"
 
-def get_latest_file_url(base_url: str):
-    print(f"Acessando: {base_url}")
+logger = setup_logging("download_operadoras", "pipeline.log", logging.INFO)
 
-    response = requests.get(base_url, timeout=30)
-    response.raise_for_status()
+def _download_text_file(url: str, out_path: Path) -> Path:
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    out_path.write_bytes(r.content)
+    logger.info(f"Salvo em: {out_path}")
+    return out_path
 
-    soup = BeautifulSoup(response.text, "html.parser")
+def _find_latest_link(base_url: str, allowed_ext: tuple[str, ...]) -> str:
+    r = requests.get(base_url, timeout=60)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
 
-    links = [
-        a["href"]
-        for a in soup.find_all("a")
-        if a.get("href", "").lower().endswith((".csv", ".txt"))
-    ]
+    links = []
+    for a in soup.find_all("a"):
+        href = a.get("href", "")
+        href_low = href.lower()
+        if any(href_low.endswith(ext) for ext in allowed_ext):
+            links.append(href)
 
     if not links:
-        raise RuntimeError("Nenhum CSV/TXT encontrado.")
+        raise RuntimeError(f"Nenhum arquivo encontrado em {base_url}")
 
     links.sort(reverse=True)
+    return base_url + links[0]
 
-    filename = links[0]
-    return base_url + filename, filename
+def run() -> dict[str, Path]:
+    logger.info("Baixando cadastros de operadoras (ativas e canceladas).")
 
+    ativas_link = _find_latest_link(ATIVAS_URL, (".csv", ".txt", ".zip"))
+    canceladas_link = _find_latest_link(CANCELADAS_URL, (".csv", ".txt", ".zip"))
 
-def download_file(url, filename):
-    path = RAW_DIR / filename
+    ativas_name = Path(ativas_link).name
+    canceladas_name = Path(canceladas_link).name
 
-    if path.exists():
-        print(f"Já existe: {filename}")
-        return
+    ativas_out = RAW_DIR / ("Relatorio_cadop.csv" if ativas_name.lower().endswith((".csv", ".txt")) else ativas_name)
+    canceladas_out = RAW_DIR / ("Relatorio_cadop_canceladas.csv" if canceladas_name.lower().endswith((".csv", ".txt")) else canceladas_name)
 
-    print(f"Baixando: {filename}")
+    if ativas_out.exists():
+        logger.info(f"Arquivo já existe, pulando: {ativas_out.name}")
+    else:
+        logger.info(f"Baixando: {Path(ativas_link).name}")
+        _download_text_file(ativas_link, ativas_out)
 
-    r = requests.get(url, stream=True, timeout=60)
-    r.raise_for_status()
+    if canceladas_out.exists():
+        logger.info(f"Arquivo já existe, pulando: {canceladas_out.name}")
+    else:
+        logger.info(f"Baixando: {Path(canceladas_link).name}")
+        _download_text_file(canceladas_link, canceladas_out)
 
-    with open(path, "wb") as f:
-        for chunk in r.iter_content(8192):
-            if chunk:
-                f.write(chunk)
-
-    print(f"Salvo em: {path}")
-
-
-def download_operadoras():
-    for nome, base_url in BASES.items():
-        print(f"\n=== OPERADORAS {nome.upper()} ===")
-
-        try:
-            url, filename = get_latest_file_url(base_url)
-            download_file(url, filename)
-        except Exception as e:
-            print(f"Erro ao baixar {nome}: {e}")
-
-    print("\nDownload de operadoras finalizado.")
-
+    return {"ativas": ativas_out, "canceladas": canceladas_out}
 
 if __name__ == "__main__":
-    download_operadoras()
+    run()

@@ -1,67 +1,101 @@
-import requests
+import logging
+import re
 from pathlib import Path
-from datetime import datetime
+from urllib.parse import urljoin
 
-BASE_URL = "https://dadosabertos.ans.gov.br/FTP/PDA/demonstracoes_contabeis"
+import requests
+from bs4 import BeautifulSoup
+
+from etl.logging_config import setup_logging
 
 RAW_DIR = Path("data/raw")
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-def file_exists(url: str) -> bool:
-    try:
-        response = requests.head(url, timeout=10)
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
+BASE_URL = "https://dadosabertos.ans.gov.br/FTP/PDA/demonstracoes_contabeis/"
 
-def find_last_three_quarters():
-    available = []
+logger = setup_logging("download_ans", "pipeline.log", logging.INFO)
 
-    current_year = datetime.now().year
 
-    for year in range(current_year, current_year - 10, -1):
-        for quarter in [4, 3, 2, 1]:
-            filename = f"{quarter}T{year}.zip"
-            url = f"{BASE_URL}/{year}/{filename}"
+def _list_links(url: str) -> list[str]:
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    links = []
+    for a in soup.find_all("a"):
+        href = a.get("href", "")
+        if href and href not in ["../", "./"]:
+            links.append(href)
+    return links
 
-            if file_exists(url):
-                available.append((year, quarter, url))
 
-                if len(available) == 3:
-                    return available
+def _discover_year_dirs() -> list[str]:
+    links = _list_links(BASE_URL)
+    years = []
+    for href in links:
+        m = re.fullmatch(r"(\d{4})\/", href)
+        if m:
+            years.append(m.group(1))
+    years.sort(reverse=True)
+    return years
 
-    return available
 
-def download_file(url: str, output_path: Path):
-    print(f"Baixando: {url}")
+def _discover_zip_links_for_year(year: str) -> list[tuple[str, str]]:
+    year_url = urljoin(BASE_URL, f"{year}/")
+    links = _list_links(year_url)
+    zips = []
+    for href in links:
+        if href.lower().endswith(".zip"):
+            zips.append((urljoin(year_url, href), href))
+    zips.sort(key=lambda x: x[1], reverse=True)
+    return zips
 
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
 
-    with open(output_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=8192):
+def _pick_last_n_zips(n: int) -> list[tuple[str, str]]:
+    years = _discover_year_dirs()
+    picked: list[tuple[str, str]] = []
+
+    for y in years:
+        zips = _discover_zip_links_for_year(y)
+        for item in zips:
+            picked.append(item)
+            if len(picked) >= n:
+                return picked
+
+    return picked
+
+
+def _download_file(url: str, out_path: Path) -> None:
+    r = requests.get(url, stream=True, timeout=120)
+    r.raise_for_status()
+    with open(out_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
 
-    print(f"Salvo em: {output_path}")
 
-if __name__ == "__main__":
-    last_three = find_last_three_quarters()
+def run(last_n_quarters: int = 3) -> list[Path]:
+    logger.info(f"Baixando os últimos {last_n_quarters} arquivos trimestrais (ZIP) da ANS.")
 
-    print("\nÚltimos 3 trimestres encontrados:")
-    for year, quarter, url in last_three:
-        print(year, quarter, url)
+    targets = _pick_last_n_zips(last_n_quarters)
+    if not targets:
+        raise RuntimeError("Nenhum ZIP encontrado em demonstracoes_contabeis.")
 
-    print("\nIniciando downloads...\n")
+    downloaded: list[Path] = []
 
-    for year, quarter, url in last_three:
-        filename = f"{quarter}T{year}.zip"
-        output_path = RAW_DIR / filename
-
-        if output_path.exists():
-            print(f"Arquivo já existe, pulando: {filename}")
+    for url, filename in targets:
+        out_path = RAW_DIR / filename
+        if out_path.exists():
+            logger.info(f"ZIP já existe, pulando: {filename}")
+            downloaded.append(out_path)
             continue
 
-        download_file(url, output_path)
+        logger.info(f"Baixando: {filename}")
+        _download_file(url, out_path)
+        logger.info(f"Salvo em: {out_path}")
+        downloaded.append(out_path)
 
-    print("\nDownload finalizado.")
+    return downloaded
+
+
+if __name__ == "__main__":
+    run()

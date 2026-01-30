@@ -2,22 +2,27 @@
 
 ## Visão Geral
 
-Projeto desenvolvido em Python para coleta, processamento, validação, consolidação e
-disponibilização de dados de despesas das operadoras de saúde a partir da API de Dados Abertos da ANS.
+Projeto desenvolvido em Python para coleta, processamento, consolidação, validação,
+enriquecimento e agregação de dados de despesas das operadoras de saúde a partir da
+API de Dados Abertos da ANS.
 
-O projeto está dividido em etapas que correspondem às partes do teste técnico: ETL de dados,
-validação e enriquecimento, consultas SQL e disponibilização via API.
+O projeto foi implementado como um **pipeline automatizado ponta a ponta**, cobrindo
+integralmente os Testes 1 e 2 do desafio técnico.
 
 ---
 
 ## Fonte dos Dados
 
-Os dados utilizados no projeto são provenientes da API de Dados Abertos da ANS (Agência Nacional de Saúde Suplementar):
+Os dados utilizados no projeto são provenientes da base pública da ANS
+(Agência Nacional de Saúde Suplementar):
 
 https://dadosabertos.ans.gov.br/FTP/PDA/
 
-Foram utilizados os arquivos de Demonstrações Contábeis trimestrais das operadoras de planos de saúde,
-organizados por ano e trimestre, conforme estrutura disponibilizada pela ANS.
+Fontes utilizadas:
+
+- Demonstrações Contábeis Trimestrais (últimos 3 trimestres disponíveis)
+- Cadastro de Operadoras de Planos de Saúde **Ativas**
+- Cadastro de Operadoras de Planos de Saúde **Canceladas**
 
 ---
 
@@ -25,33 +30,40 @@ organizados por ano e trimestre, conforme estrutura disponibilizada pela ANS.
 
 - Python 3.10+
 - Pandas
-- FastAPI
 - Requests
+- BeautifulSoup4
+- FastAPI (prevista para disponibilização via API, conforme escopo do teste)
 - Git
 
 ---
 
 ## Estrutura do Projeto
+
 ```
 Teste_IntuitiveCare/
 │
 ├── etl/
 │   ├── download_ans.py
-│   └── process_files.py
+│   ├── download_operadoras.py
+│   ├── process_files.py
+│   ├── consolidate.py
+│   └── validate_and_aggregate.py
 │
 ├── data/
 │   ├── raw/
 │   ├── extracted/
 │   └── final/
 │
+├── logs/
+│   ├── etl.log
+│   └── validation.log
+│
 ├── api/
 │   └── main.py
 │
 ├── sql/
 │
-├── logs/
-│   └── etl.log
-│
+├── run_pipeline.py
 ├── requirements.txt
 └── README.md
 ```
@@ -62,134 +74,172 @@ Teste_IntuitiveCare/
 
 ### 1. Criar ambiente virtual
 
-```
+```bash
 python -m venv .venv
 ```
 
 ### 2. Ativar ambiente virtual
 
 Windows:
-
-```
+```bash
 .venv\Scripts\activate
 ```
 
 Linux/Mac:
-
-```
+```bash
 source .venv/bin/activate
 ```
 
 ### 3. Instalar dependências
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-## Execução do ETL
+## Execução do Pipeline Completo (Recomendado)
 
-### 1. Download dos últimos 3 trimestres da ANS
-
-```
-python etl/download_ans.py
+```bash
+python run_pipeline.py
 ```
 
-O script identifica automaticamente os últimos três trimestres disponíveis e realiza o download
-dos arquivos ZIP para a pasta data/raw.
+Esse comando executa automaticamente:
 
-### 2. Extração, filtragem e consolidação das despesas
-
-```
-python etl/process_files.py
-```
-
-O script realiza:
-
-- Extração automática dos arquivos ZIP
-- Leitura de arquivos em diferentes formatos (CSV, TXT e XLSX)
-- Filtragem de registros relacionados a despesas assistenciais
-- Normalização de valores monetários
-- Agregação por operadora e trimestre
-
-O resultado é salvo em:
-
-data/final/despesas_por_operadora_trimestre.csv
-
-Todo o processo gera logs detalhados em:
-
-logs/etl.log
-
-### 3. Enriquecimento com dados cadastrais das operadoras
-
-```
-python etl/consolidate.py
-```
-
-Este script realiza o cruzamento dos dados consolidados com a base cadastral de operadoras da ANS,
-adicionando CNPJ e Razão Social, gerando o arquivo final no formato exigido pelo teste técnico.
+1. Download dos cadastros de operadoras (ativas e canceladas)
+2. Download dos últimos 3 arquivos trimestrais de demonstrações contábeis
+3. Extração e processamento dos arquivos
+4. Consolidação com dados cadastrais
+5. Validação, enriquecimento e agregação final
+6. Geração do arquivo ZIP final exigido no teste
 
 ---
 
-## Decisões Técnicas e Trade-offs
+## Execução por Etapas (Opcional)
 
-### Escolha da Linguagem
+### Download das Demonstrações Contábeis
 
-Foi escolhido Python devido à sua ampla utilização em projetos de integração e processamento de dados,
-além do ecossistema de bibliotecas que facilitam a leitura de diferentes formatos de arquivos,
-tratamento de dados e integração com APIs REST.
+```bash
+python etl/download_ans.py
+```
 
-Essa escolha permite maior produtividade e foco na lógica de negócio.
+### Download do Cadastro de Operadoras
 
-### Organização do Pipeline
+```bash
+python etl/download_operadoras.py
+```
 
-O processo foi dividido em scripts independentes para facilitar manutenção, testes e compreensão do
-fluxo de dados:
+### Processamento e Consolidação Inicial (ETL)
 
-- Download
-- Processamento e consolidação
-- Enriquecimento cadastral
+```bash
+python etl/process_files.py
+```
 
-### Uso de Memória e Performance
+Gera:
+```
+data/final/despesas_por_operadora_trimestre.csv
+```
 
-Os arquivos são processados individualmente e filtrados antes da agregação, evitando manter grandes
-volumes de dados brutos simultaneamente em memória. Apenas os dados agregados por operadora e
-trimestre são mantidos para a consolidação final.
+### Consolidação com Dados Cadastrais
 
-### Tratamento de Inconsistências
+```bash
+python etl/consolidate.py
+```
 
-Foram consideradas as seguintes situações:
+Gera:
+```
+data/final/despesas_consolidadas_final.csv
+data/final/consolidado_despesas.zip
+```
 
-- Arquivos com estruturas diferentes: apenas arquivos contendo as colunas REG_ANS, DESCRICAO e
-  VL_SALDO_FINAL são processados. Arquivos fora desse padrão são ignorados e registrados em log.
+### Validação, Enriquecimento e Agregação (Teste 2)
 
-- Valores zerados ou negativos: os valores são mantidos, pois podem representar ajustes contábeis ou
-  estornos, sendo relevantes para análise financeira.
+```bash
+python etl/validate_and_aggregate.py
+```
 
-- Formatos inconsistentes de nomes de arquivos: quando não é possível extrair ano e trimestre do
-  nome do arquivo, o registro é descartado e registrado em log.
+Gera:
+```
+data/final/despesas_agregadas.csv
+Teste_Everton_Brandao.zip
+```
 
-- Divergências cadastrais: os dados de CNPJ e Razão Social são obtidos diretamente da base oficial da
-  ANS, considerada como fonte de maior confiabilidade.
+---
+
+## Teste 2 – Transformação e Validação de Dados
+
+### Validações Implementadas
+
+- CNPJ válido (formato + dígitos verificadores)
+- Razão Social não vazia
+- Valores numéricos não negativos
+
+#### Estratégia para CNPJs Inválidos
+
+**Decisão adotada:** descarte dos registros com CNPJ inválido.
+
+**Prós:**
+- Evita inconsistências no enriquecimento
+- Garante integridade das agregações
+- Simplifica o pipeline
+
+**Contras:**
+- Redução do volume final de dados
+- Possível perda de registros com erro de origem
+
+---
+
+### Enriquecimento de Dados
+
+- Join realizado via `CNPJ`
+- Cadastros de operadoras ativas e canceladas são unificados
+- Registros sem correspondência no cadastro são mantidos com campos nulos
+- Duplicidades de CNPJ são resolvidas via `drop_duplicates`
+
+Colunas adicionadas:
+- RegistroANS
+- Modalidade
+- UF
+
+---
+
+### Agregações Realizadas
+
+Agrupamento por:
+- RazaoSocial
+- UF
+
+Métricas calculadas:
+- Total de despesas
+- Média trimestral
+- Desvio padrão
+
+Ordenação:
+- Total de despesas (ordem decrescente)
+
+---
+
+## Logs
+
+- `logs/etl.log`: download, extração, processamento e consolidação
+- `logs/validation.log`: validações, enriquecimento e agregações
 
 ---
 
 ## Resultado Final
 
-O processamento gera como saída principal:
+Arquivos gerados:
 
-- data/final/despesas_por_operadora_trimestre.csv  
-  Contendo os valores consolidados de despesas assistenciais por operadora, ano e trimestre.
-
-- consolidado_despesas.zip  
-  Arquivo compactado contendo o CSV final no formato exigido pelo teste técnico.
+- `despesas_por_operadora_trimestre.csv`
+- `despesas_consolidadas_final.csv`
+- `despesas_agregadas.csv`
+- `Teste_Everton_Brandao.zip`
 
 ---
 
 ## Limitações e Melhorias Futuras
 
-- Implementar testes automatizados para os scripts de ETL e para a API.
-- Persistir os dados em banco de dados relacional para consultas mais performáticas.
-- Implementar cache para consultas frequentes na API.
-- Criar interface frontend para visualização dos dados.
+- Implementar testes automatizados
+- Persistir dados em banco relacional
+- Evoluir a API em FastAPI
+- Implementar cache para consultas frequentes
