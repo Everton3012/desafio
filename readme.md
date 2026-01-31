@@ -6,8 +6,7 @@ Projeto desenvolvido em Python para coleta, processamento, consolidação, valid
 enriquecimento e agregação de dados de despesas das operadoras de saúde a partir da
 API de Dados Abertos da ANS.
 
-O projeto foi implementado como um **pipeline automatizado ponta a ponta**, cobrindo
-integralmente os Testes 1, 2 e 3 do desafio técnico.
+O projeto foi implementado como um **pipeline automatizado ponta a ponta**, cobrindo integralmente os Testes 1, 2, 3 e 4 do desafio técnico.
 
 ---
 
@@ -32,7 +31,7 @@ Fontes utilizadas:
 - Pandas
 - Requests
 - BeautifulSoup4
-- FastAPI (prevista para disponibilização via API, conforme escopo do teste)
+- FastAPI
 - Git
 
 ---
@@ -59,7 +58,10 @@ Teste_IntuitiveCare/
 │   └── validation.log
 │
 ├── api/
-│   └── main.py
+│   ├── main.py
+│   ├── db.py
+│   ├── queries.py
+│   └── schemas.py
 │
 ├── sql/
 │
@@ -128,7 +130,6 @@ python etl/download_ans.py
 ```bash
 python etl/download_operadoras.py
 ```
-
 ### Processamento e Consolidação Inicial (ETL)
 
 ```bash
@@ -162,6 +163,73 @@ Gera:
 ```
 data/final/despesas_agregadas.csv
 Teste_Everton_Brandao.zip
+```
+
+---
+
+## Executar Banco (PostgreSQL via Docker) + Importar CSVs
+
+> Pré-requisito: Docker instalado.
+
+### 1) Subir o container PostgreSQL
+
+Exemplo:
+
+```bash
+docker run --name intuitivecare_postgres -e POSTGRES_DB=intuitivecare -e POSTGRES_USER=intuitive -e POSTGRES_PASSWORD=intuitive123 -p 5432:5432 -d postgres:15
+```
+### 2) Copiar CSVs gerados para dentro do container
+
+```bash
+docker cp data/final/despesas_consolidadas_final.csv intuitivecare_postgres:/tmp/despesas_consolidadas_final.csv
+docker cp data/final/despesas_agregadas.csv intuitivecare_postgres:/tmp/despesas_agregadas.csv
+docker cp data/raw/Relatorio_cadop.csv intuitivecare_postgres:/tmp/Relatorio_cadop.csv
+docker cp data/raw/Relatorio_cadop_canceladas.csv intuitivecare_postgres:/tmp/Relatorio_cadop_canceladas.csv
+```
+
+### 3) Rodar DDL e Import
+```bash
+docker exec -i intuitivecare_postgres psql -U intuitive -d intuitivecare -v ON_ERROR_STOP=1 < sql/01_ddl.sql
+docker exec -i intuitivecare_postgres psql -U intuitive -d intuitivecare -v ON_ERROR_STOP=1 < sql/02_import.sql
+```
+### 4) Validar carga
+
+```bash
+docker exec -it intuitivecare_postgres psql -U intuitive -d intuitivecare -c "SELECT COUNT(*) operadoras FROM operadoras; SELECT COUNT(*) despesas FROM despesas_consolidadas; SELECT COUNT(*) agregadas FROM despesas_agregadas;"
+```
+
+---
+
+## Executar API (FastAPI)
+
+### 1) Criar arquivo `.env` na raiz
+
+Use o `.env.example` como base e crie um `.env` com:
+
+```env
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=intuitivecare
+DB_USER=intuitive
+DB_PASSWORD=intuitive123
+```
+
+### 2) Subir o servidor
+
+```bash
+uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### 3) Acessar documentação (Swagger)
+
+- http://127.0.0.1:8000/docs
+
+### 4) Teste rápido
+
+```bash
+curl -X GET "http://127.0.0.1:8000/health"
+curl -X GET "http://127.0.0.1:8000/api/operadoras?page=1&limit=10"
+curl -X GET "http://127.0.0.1:8000/api/estatisticas"
 ```
 
 ---
@@ -216,8 +284,6 @@ Métricas calculadas:
 
 Ordenação:
 - Total de despesas (ordem decrescente)
-
----
 
 ---
 
@@ -313,6 +379,65 @@ para maior clareza e desempenho.
 - Foi escolhida uma abordagem baseada em agregações e CTEs por oferecer boa
   legibilidade e facilidade de manutenção.
 
+---
+
+## Atualização dos dados (novos trimestres)
+
+O pipeline sempre baixa automaticamente os **últimos 3 trimestres disponíveis** na ANS.
+Quando um novo trimestre é publicado, basta executar novamente:
+
+```bash
+python run_pipeline.py
+```
+Depois, reimportar os CSVs no PostgreSQL:
+
+```bash
+docker exec -i intuitivecare_postgres psql -U intuitive -d intuitivecare -v ON_ERROR_STOP=1 < sql/02_import.sql
+```
+A estratégia adotada no import é `TRUNCATE + INSERT`, garantindo consistência e simplicidade (KISS),
+já que o volume é moderado.
+
+---
+
+## Teste 4 – API (FastAPI)
+
+Foi implementada uma API em FastAPI para consulta das operadoras e despesas consolidadas
+a partir do banco PostgreSQL gerado no Teste 3.
+
+### Rotas implementadas
+
+- `GET /api/operadoras`  
+  Lista operadoras com paginação (`page`, `limit`) e filtro opcional `q` (CNPJ ou Razão Social).
+
+- `GET /api/operadoras/{cnpj}`  
+  Retorna detalhes de uma operadora específica.
+
+- `GET /api/operadoras/{cnpj}/despesas`  
+  Retorna o histórico de despesas da operadora nos 3 trimestres analisados.
+
+- `GET /api/estatisticas`  
+  Retorna estatísticas agregadas: total, média, top 5 operadoras e top 5 UFs por despesas.
+
+- `GET /health`  
+  Healthcheck simples com verificação de conexão ao banco.
+
+### Trade-offs Técnicos (Backend)
+
+**Framework:** FastAPI  
+Escolhi FastAPI por oferecer tipagem, validação automática (Pydantic), Swagger/OpenAPI nativo,
+boa performance e facilidade de manutenção.
+
+**Paginação:** Offset-based (`page/limit` com `OFFSET/LIMIT`)  
+Escolhida por simplicidade (KISS) e por o volume ser baixo/moderado (~4k operadoras).  
+Para grandes volumes, seria melhor Keyset/Cursor pagination.
+
+**/api/estatisticas:** queries diretas  
+As estatísticas são calculadas via SQL no momento da requisição, pois os dados mudam apenas
+quando o pipeline é executado. Em cenário real, poderia ser cacheado por X minutos ou pré-calculado.
+
+**Resposta de paginação:** dados + metadados  
+Retorna `{ data, total, page, limit }` para facilitar o frontend e evitar chamadas extras.
+
 ## Logs
 
 - `logs/etl.log`: download, extração, processamento e consolidação
@@ -334,6 +459,18 @@ Arquivos gerados:
 ## Limitações e Melhorias Futuras
 
 - Implementar testes automatizados
-- Persistir dados em banco relacional
-- Evoluir a API em FastAPI
-- Implementar cache para consultas frequentes
+- Automatizar a carga no banco após a execução do pipeline (ex.: script único ou docker-compose)
+- Ajustar encoding de strings (ex.: normalizar para UTF-8 para evitar caracteres como "SAÃDE")
+- Implementar o frontend Vue.js (tabela, busca, gráfico por UF e tela de detalhes)
+- Criar coleção do Postman com exemplos de requests/respostas
+---
+
+## Frontend (Vue.js) – Status
+
+A interface web em Vue.js está planejada conforme especificação do Teste 4, com:
+- tabela paginada de operadoras
+- busca por CNPJ/Razão Social
+- gráfico de distribuição de despesas por UF
+- página de detalhes com histórico de despesas
+
+(Implementação em andamento / não incluída nesta entrega.)
